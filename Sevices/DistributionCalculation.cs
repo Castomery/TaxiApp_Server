@@ -262,15 +262,18 @@ namespace MyServer.Sevices
 
             double[] w = new double[priceForOneCar.Length];
 
-            for (int i = 0; i < keys.Length; i++)
+            Parallel.For(0, keys.Length, i =>
             {
                 int key = keys[i];
 
                 ShortestRoute route = answer[key];
                 if (HasOnlyOneBitSet(key))
                 {
-                    routes.Add(route);
-                    continue;
+                    lock (routes)
+                    {
+                        routes.Add(route);
+                    }
+                    return;
                 }
 
                 List<int> indexesOfAddresses = new List<int>();
@@ -280,7 +283,7 @@ namespace MyServer.Sevices
                     {
                         if (route.route[x].Equals(coords[key][j]))
                         {
-                            indexesOfAddresses.Add(x-1);
+                            indexesOfAddresses.Add(x - 1);
                         }
                     }
                 }
@@ -289,7 +292,7 @@ namespace MyServer.Sevices
 
                 List<int> subsets = GetBitsFromBitmask(key);
 
-                CalculateValuesForPriceDistributionCalculatiions(key,ref w, ref v, priceForOneCar, subsets);
+                CalculateValuesForPriceDistributionCalculatiions(key, ref w, ref v, priceForOneCar, subsets);
 
                 int factorial = 1;
 
@@ -302,7 +305,7 @@ namespace MyServer.Sevices
 
                 double[] shaplyVector = CalculateShaply(count, array);
 
-                double[] valueToPay = GetValueToPay(count,shaplyVector,subsets,v);
+                double[] valueToPay = GetValueToPay(count, shaplyVector, subsets, v);
 
                 route.priceDistribution = new double[valueToPay.Length];
 
@@ -311,8 +314,13 @@ namespace MyServer.Sevices
                     route.priceDistribution[indexesOfAddresses[j]] = valueToPay[j];
                 }
 
-                routes.Add(route);
-            }
+                lock (routes)
+                {
+                    routes.Add(route);
+                }
+                //routes.Add(route);
+            });
+
             return routes;
         }
 
@@ -484,7 +492,7 @@ namespace MyServer.Sevices
             }
         }
 
-        private List<int> GetSubsets(int n)
+        public List<int> GetSubsets(int n)
         {
             int count = n;
             List<int> arrsubsets = new List<int>();
@@ -527,19 +535,22 @@ namespace MyServer.Sevices
                 }
 
                 double temp = lowestPrice[arrsubsets[x]] + lowestPrice[arrsubsets[y]];
-                if (temp < priceForOneCar[count])
-                {
-                    distribution[count] = new List<int>() { arrsubsets[x], arrsubsets[y] };
-                }
-                else
+                //if (temp < priceForOneCar[count])
+                //{
+                    
+                //}
+                if (temp > priceForOneCar[count])
                 {
                     temp = priceForOneCar[count];
 
                 }
                 if (lowestPrice[count] > temp)
                 {
+                    if (temp != priceForOneCar[count])
+                    {
+                        distribution[count] = new List<int>() { arrsubsets[x], arrsubsets[y] };
+                    }
                     lowestPrice[count] = temp;
-
                 }
             }
         }
