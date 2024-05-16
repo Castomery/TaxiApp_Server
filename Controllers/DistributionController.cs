@@ -33,9 +33,9 @@ namespace MyServer.Controllers
 
         [HttpPost]
         [Route("GetDistribution")]
-        public async Task<ActionResult<string>> GetDistribution([FromQuery] string origin, [FromQuery] double priceForCar, [FromQuery] double pricePerKm, [FromBody] List<string> coordinates)
+        public async Task<ActionResult<string>> GetDistribution([FromQuery] string origin, [FromQuery] double priceForCar, [FromQuery] double pricePerKm, [FromQuery] int max_passengers, [FromBody] List<string> coordinates)
         {
-            var result = await _distributionCalculation.GetDistribution(origin, priceForCar,pricePerKm,coordinates);
+            var result = await _distributionCalculation.GetDistribution(origin, priceForCar,pricePerKm, max_passengers,coordinates);
 
             return Ok(result);
         }

@@ -15,7 +15,8 @@ namespace MyServer.Sevices
         private double pricePerKm;
         private HttpClient _client = new HttpClient();
         private string _addressUrl = "https://api.mapbox.com/optimized-trips/v1/mapbox/driving/";
-        private string _accessToken = "pk.eyJ1IjoiY3VzdG9tZXJ5IiwiYSI6ImNsdTV0ZjdzcDFyYWIycnQ0c3A3YjR4bGMifQ.MhMF_oqJ6eVB6udAestl8g";
+        private string _accessToken = Environment.GetEnvironmentVariable("mapBoxToken");
+        private int max_Passengers;
         private async Task<OptimizationResponse> GetDistance(string route)
         {
             var response = await _client.GetAsync($"{_addressUrl}{route}?source=first&destination=last&roundtrip=false&access_token={_accessToken}");
@@ -160,10 +161,11 @@ namespace MyServer.Sevices
             route.totalPrice = priceForCar + (distanceInKm - 1) * (pricePerKm + route.route.Count - 1);
         }
 
-        public async Task<List<ShortestRoute>> GetDistribution(string origin,double priceForCar,double pricePerKm, List<string> coordinates)
+        public async Task<List<ShortestRoute>> GetDistribution(string origin,double priceForCar,double pricePerKm,int max_passengers, List<string> coordinates)
         {
             this.priceForCar = priceForCar;
             this.pricePerKm = pricePerKm;
+            max_Passengers = max_passengers;
             int totalRoutes = 1 << coordinates.Count;
             ShortestRoute[] result = new ShortestRoute[totalRoutes];
             Task<ShortestRoute>[] tasks = new Task<ShortestRoute>[totalRoutes];
@@ -318,7 +320,6 @@ namespace MyServer.Sevices
                 {
                     routes.Add(route);
                 }
-                //routes.Add(route);
             });
 
             return routes;
@@ -496,6 +497,7 @@ namespace MyServer.Sevices
         {
             int count = n;
             List<int> arrsubsets = new List<int>();
+            List<int> subsetsToSkip = new List<int>();
             while (n > 0)
             {
                 n = (n - 1) & count;
@@ -503,9 +505,28 @@ namespace MyServer.Sevices
                 {
                     break;
                 }
-                arrsubsets.Add(n);
+
+                if (CountSetBits(n) <= max_Passengers && !subsetsToSkip.Contains(n))
+                {
+                    arrsubsets.Add(n);
+                }
+                else
+                {
+                    subsetsToSkip.Add(count - n);
+                }
             }
             return arrsubsets;
+        }
+
+        private int CountSetBits(int n)
+        {
+            int count = 0;
+            while (n > 0)
+            {
+                count += n & 1;
+                n >>= 1;
+            }
+            return count;
         }
 
         private void GetAnswer(int count, ShortestRoute[] result, ref double[] lowestPrice, ref double[] priceForOneCar, ref Dictionary<int, List<int>> distribution)
@@ -535,10 +556,6 @@ namespace MyServer.Sevices
                 }
 
                 double temp = lowestPrice[arrsubsets[x]] + lowestPrice[arrsubsets[y]];
-                //if (temp < priceForOneCar[count])
-                //{
-                    
-                //}
                 if (temp > priceForOneCar[count])
                 {
                     temp = priceForOneCar[count];

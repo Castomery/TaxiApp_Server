@@ -8,9 +8,6 @@ namespace MyServer
         {
             double[] distance = new double[4];
 
-            DistributionCalculation distribution = new DistributionCalculation();
-            distribution.GetSubsets(42);
-
             var builder = WebApplication.CreateBuilder(args);
 
             // Add services to the container.
