@@ -2,6 +2,7 @@
 using Microsoft.AspNetCore.Routing;
 using MyServer.Models;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.Metrics;
 using System.Drawing;
 using System.Reflection;
@@ -11,19 +12,213 @@ namespace MyServer.Sevices
 {
     public class DistributionCalculation : IDistributionCalculation
     {
-        private double priceForCar;
-        private double pricePerKm;
+        private decimal priceForCar;
+        private decimal pricePerKm;
         private HttpClient _client = new HttpClient();
         private string _addressUrl = "https://api.mapbox.com/optimized-trips/v1/mapbox/driving/";
         private string _accessToken = Environment.GetEnvironmentVariable("mapBoxToken");
         private int max_Passengers;
+
+        int count = 0;
         private async Task<OptimizationResponse> GetDistance(string route)
         {
             var response = await _client.GetAsync($"{_addressUrl}{route}?source=first&destination=last&roundtrip=false&access_token={_accessToken}");
 
             var body = await response.Content.ReadFromJsonAsync<OptimizationResponse>();
 
+            count++;
+
             return body;
+        }
+
+
+        private async Task<ShortestRoute[,]> GetRouteMatrix(string[] coords)
+        {
+            ShortestRoute[,] matrix = new ShortestRoute[coords.Length, coords.Length];
+
+            List<Task> tasks = new List<Task>();
+
+            for (int i = 0; i < matrix.GetLength(0); i++)
+            {
+                for (int j = 0; j < matrix.GetLength(1); j++)
+                {
+                    if (i == j || j == 0)
+                    {
+                        continue;
+                    }
+                    else
+                    {
+                        int x = i, y = j;
+                        tasks.Add(Task.Run(async () =>
+                        {
+                            OptimizationResponse response = await GetDistance(coords[x] + ";" + coords[y]);
+                            ShortestRoute route = new ShortestRoute
+                            {
+                                route = new List<string> { coords[x], coords[y] },
+                                distance = response.trips[0].distance,
+                                duration = response.trips[0].duration,
+                                pointsNames = response.waypoints.Select(point => point.name).ToList()
+                            };
+
+                            CalculatePriceOfRoute(route);
+                            matrix[x, y] = route;
+                        }));
+
+                    }
+                }
+            }
+
+            await Task.WhenAll(tasks);
+
+            return matrix;
+        }
+
+        private void CalculatePriceOfRoute(ShortestRoute route)
+        {
+            double distanceInKm = route.distance / 1000;
+            route.totalPrice = decimal.Round(priceForCar +(decimal)(distanceInKm-1) * (pricePerKm + (route.route.Count - 1)), 1);
+        }
+
+        public async Task<Dictionary<string,List<ShortestRoute>>> GetShortestRouteWithMatrix(string origin, decimal priceForCar, decimal pricePerKm, int max_passengers, List<string> coordinates)
+        {
+            this.priceForCar = priceForCar;
+            this.pricePerKm = pricePerKm;
+            this.max_Passengers = max_passengers;
+            int totalRoutes = 1 << coordinates.Count;
+            ShortestRoute[] result = new ShortestRoute[totalRoutes];
+            Task<ShortestRoute>[] tasks = new Task<ShortestRoute>[totalRoutes];
+
+            string[] coords = new string[coordinates.Count + 1];
+            for (int i = 0; i < coords.Length; i++)
+            {
+                if (i == 0)
+                {
+                    coords[i] = origin;
+                }
+                else
+                {
+                    coords[i] = coordinates[i - 1];
+                }
+            }
+
+            ShortestRoute[,] routeMatrix = await GetRouteMatrix(coords);
+
+            for (int i = 0; i < totalRoutes; i++)
+            {
+                int bitmask = i;
+                tasks[i] = Task.Run(() => GetRouteForBitmask(bitmask, routeMatrix));
+            }
+
+            result = await Task.WhenAll(tasks);
+
+
+
+            decimal[] pricesForOneCar = new decimal[result.Length];
+
+            for (int i = 1; i < totalRoutes; i++)
+            {
+                pricesForOneCar[i] = decimal.Round(result[i].totalPrice, 1);
+            }
+
+            Dictionary<string, List<ShortestRoute>> results = new Dictionary<string, List<ShortestRoute>>();
+
+            if (coordinates.Count <= max_Passengers)
+            {
+                var forOneCarTask = Task.Run(async () =>
+                {
+                    int indexOfRoute = (1 << coordinates.Count) - 1;
+                    Dictionary<int, ShortestRoute> answer = new Dictionary<int, ShortestRoute>
+                {
+                    {indexOfRoute, result[indexOfRoute] }
+                };
+
+                    Dictionary<int, List<string>> routeCoords = new Dictionary<int, List<string>>
+                {
+                    { indexOfRoute, coordinates }
+                };
+
+                    return CalculatePriceDistribution(answer, pricesForOneCar, pricesForOneCar, routeCoords);
+                });
+
+                results.Add("oneCar", await forOneCarTask);
+            }
+
+            var distributionTask = Task.Run(async () => 
+            {
+                decimal[] lowestPrice = new decimal[result.Length];
+                Array.Fill(lowestPrice, decimal.MaxValue);
+
+                Dictionary<int, List<int>> distribution = new Dictionary<int, List<int>>();
+                for (int i = 0; i < result.Length; i++)
+                {
+                    distribution.Add(i, new List<int>());
+                }
+
+                GetAnswer(totalRoutes - 1, result, ref lowestPrice, ref pricesForOneCar, ref distribution);
+
+                Dictionary<int, ShortestRoute> answer = new Dictionary<int, ShortestRoute>();
+
+                FillAnswerList(totalRoutes - 1, distribution, result, ref answer);
+
+                Dictionary<int, List<string>> coords = InitiDictionaryReccomendation(answer, coordinates);
+
+                return CalculatePriceDistribution(answer, lowestPrice, pricesForOneCar, coords);
+            });
+
+            
+
+            results.Add("recommendations", await distributionTask);
+
+            return results;
+
+        }
+
+        private ShortestRoute GetRouteForBitmask(int bitmask, ShortestRoute[,] routeMatrix)
+        {
+            ShortestRoute route = new ShortestRoute();
+            List<int> indeces = GetBitsFromBitmask(bitmask, 1);
+            List<int[]> permutations = new List<int[]>();
+            double minDistance = double.MaxValue;
+
+
+
+            PermuteHelper(indeces.ToArray(), 0, indeces.Count - 1, permutations);
+            for (int i = 0; i < permutations.Count; i++)
+            {
+                HashSet<string> resultSet = new HashSet<string>();
+                HashSet<string> resultsAddresses = new HashSet<string>();
+                int startIndex = 0;
+                decimal currSum = 0;
+                double currDuration = 0;
+                double currDistance = 0;
+                for (int j = 0; j < permutations[i].Length; j++)
+                {
+                    if (startIndex == permutations[i][j] || routeMatrix[startIndex, permutations[i][j]] == null)
+                    {
+                        continue;
+                    }
+                    else
+                    {
+                        currSum += routeMatrix[startIndex, permutations[i][j]].totalPrice;
+                        currDuration += routeMatrix[startIndex, permutations[i][j]].duration;
+                        currDistance += routeMatrix[startIndex, permutations[i][j]].distance;
+                        resultSet.UnionWith(routeMatrix[startIndex, permutations[i][j]].route);
+                        resultsAddresses.UnionWith(routeMatrix[startIndex, permutations[i][j]].pointsNames);
+                        startIndex = permutations[i][j];
+                    }
+                }
+                if (minDistance > currDistance)
+                {
+                    minDistance = currDistance;
+                    route.route = resultSet.ToList();
+                    route.pointsNames = new List<string>();
+                    route.duration = Math.Round(currDuration/60);
+                    route.distance = currDistance;
+                    CalculatePriceOfRoute(route);
+                }
+            }
+
+            return route;
         }
 
         private List<List<string>> GetPermutations(string origin, List<string> coordinates)
@@ -31,7 +226,7 @@ namespace MyServer.Sevices
             List<List<string>> permutations = new List<List<string>>();
             for (int i = 0; i < coordinates.Count(); i++)
             {
-                List<string> points = new List<string>() { origin};
+                List<string> points = new List<string>() { origin };
                 for (int j = 0; j < coordinates.Count(); j++)
                 {
                     int index = (i + j) % coordinates.Count;
@@ -42,7 +237,7 @@ namespace MyServer.Sevices
             return permutations;
         }
 
-        public async Task<List<string>> GetRoute(string origin, List<string> coordinates) 
+        public async Task<List<string>> GetRoute(string origin, List<string> coordinates)
         {
             List<string> route = new List<string>();
 
@@ -70,7 +265,7 @@ namespace MyServer.Sevices
         }
         private async Task<ShortestRoute> GetShortestDistanceRoute(string origin, List<string> coordinates)
         {
-            
+
             double currDistance = double.MaxValue;
             ShortestRoute shortestRoute = new ShortestRoute();
 
@@ -81,7 +276,7 @@ namespace MyServer.Sevices
             {
                 tasks.Add(Task.Run(async () =>
                 {
-                    
+
                     OptimizationResponse response = await GetDistance(string.Join(";", permutation.ToArray()));
                     if (currDistance > response.trips[0].distance)
                     {
@@ -89,7 +284,7 @@ namespace MyServer.Sevices
                         shortestRoute.route = permutation;
                         shortestRoute.pointsNames = response.waypoints.Select(point => point.name).ToList();
                         shortestRoute.distance = currDistance;
-                        shortestRoute.duration = response.trips[0].duration/60 < 1? 1: response.trips[0].duration / 60;
+                        shortestRoute.duration = response.trips[0].duration / 60 < 1 ? 1 : response.trips[0].duration / 60;
                         CalculatePriceForRoute(shortestRoute);
                     }
                 }));
@@ -100,7 +295,7 @@ namespace MyServer.Sevices
             return shortestRoute;
         }
 
-        public async Task<ShortestRoute> GetPriceDistributionForOneCar(string origin, double priceForCar, double pricePerKm, List<string> coordinates)
+        public async Task<ShortestRoute> GetPriceDistributionForOneCar(string origin, decimal priceForCar, decimal pricePerKm, List<string> coordinates)
         {
             this.priceForCar = priceForCar;
             this.pricePerKm = pricePerKm;
@@ -132,7 +327,7 @@ namespace MyServer.Sevices
                 }
             }
 
-            double[] pricesForOneCar = new double[result.Length];
+            decimal[] pricesForOneCar = new decimal[result.Length];
 
             for (int i = 1; i < totalRoutes; i++)
             {
@@ -149,7 +344,7 @@ namespace MyServer.Sevices
 
             Dictionary<int, List<string>> routeCoords = new Dictionary<int, List<string>>();
             routeCoords.Add(indexOfRoute, coordinates);
-            
+
             List<ShortestRoute> best = CalculatePriceDistribution(answer, pricesForOneCar, pricesForOneCar, routeCoords);
             ShortestRoute routeToReturn = best.FirstOrDefault();
             return routeToReturn;
@@ -158,10 +353,10 @@ namespace MyServer.Sevices
         private void CalculatePriceForRoute(ShortestRoute route)
         {
             double distanceInKm = route.distance / 1000;
-            route.totalPrice = priceForCar + (distanceInKm - 1) * (pricePerKm + route.route.Count - 1);
+            route.totalPrice = priceForCar + (decimal)(distanceInKm - 1) * (pricePerKm + route.route.Count - 1);
         }
 
-        public async Task<List<ShortestRoute>> GetDistribution(string origin,double priceForCar,double pricePerKm,int max_passengers, List<string> coordinates)
+        public async Task<List<ShortestRoute>> GetDistribution(string origin, decimal priceForCar, decimal pricePerKm, int max_passengers, List<string> coordinates)
         {
             this.priceForCar = priceForCar;
             this.pricePerKm = pricePerKm;
@@ -194,10 +389,10 @@ namespace MyServer.Sevices
                 }
             }
 
-            double[] pricesForOneCar = new double[result.Length];
+            decimal[] pricesForOneCar = new decimal[result.Length];
 
-            double[] lowestPrice = new double[result.Length];
-            Array.Fill(lowestPrice, double.MaxValue);
+            decimal[] lowestPrice = new decimal[result.Length];
+            Array.Fill(lowestPrice, decimal.MaxValue);
 
             for (int i = 1; i < totalRoutes; i++)
             {
@@ -255,14 +450,14 @@ namespace MyServer.Sevices
             return coords;
         }
 
-        private List<ShortestRoute> CalculatePriceDistribution(Dictionary<int, ShortestRoute> answer, double[] lowestPrice, double[] priceForOneCar, Dictionary<int,List<string>> coords)
+        private List<ShortestRoute> CalculatePriceDistribution(Dictionary<int, ShortestRoute> answer, decimal[] lowestPrice, decimal[] priceForOneCar, Dictionary<int, List<string>> coords)
         {
             List<ShortestRoute> routes = new List<ShortestRoute>();
             int[] keys = answer.Keys.ToArray<int>();
 
-            double[] v = new double[priceForOneCar.Length];
+            decimal[] v = new decimal[priceForOneCar.Length];
 
-            double[] w = new double[priceForOneCar.Length];
+            decimal[] w = new decimal[priceForOneCar.Length];
 
             Parallel.For(0, keys.Length, i =>
             {
@@ -292,7 +487,7 @@ namespace MyServer.Sevices
 
                 int count = answer[key].route.Count - 1;
 
-                List<int> subsets = GetBitsFromBitmask(key);
+                List<int> subsets = GetBitsFromBitmask(key, 0);
 
                 CalculateValuesForPriceDistributionCalculatiions(key, ref w, ref v, priceForOneCar, subsets);
 
@@ -303,13 +498,13 @@ namespace MyServer.Sevices
                     factorial *= k;
                 }
 
-                double[,] array = BuildArrayForCalculations(factorial, count, key, w);
+                decimal[,] array = BuildArrayForCalculations(factorial, count, key, w);
 
-                double[] shaplyVector = CalculateShaply(count, array);
+                decimal[] shaplyVector = CalculateShaply(count, array);
 
-                double[] valueToPay = GetValueToPay(count, shaplyVector, subsets, v);
+                decimal[] valueToPay = GetValueToPay(count, shaplyVector, subsets, v);
 
-                route.priceDistribution = new double[valueToPay.Length];
+                route.priceDistribution = new decimal[valueToPay.Length];
 
                 for (int j = 0; j < route.priceDistribution.Length; j++)
                 {
@@ -325,11 +520,11 @@ namespace MyServer.Sevices
             return routes;
         }
 
-        private double[,] BuildArrayForCalculations(int factorial, int count, int key, double[] w)
+        private decimal[,] BuildArrayForCalculations(int factorial, int count, int key, decimal[] w)
         {
-            double[,] array = new double[factorial, count];
+            decimal[,] array = new decimal[factorial, count];
 
-            int[] arrayOfIndexes = GetBitsFromBitmask(key).ToArray();
+            int[] arrayOfIndexes = GetBitsFromBitmask(key, 0).ToArray();
 
             List<int[]> result = new List<int[]>();
 
@@ -350,21 +545,22 @@ namespace MyServer.Sevices
                 int[] indexesToCheck = result[k];
                 int[] indexesToFill = helpList[k];
                 int indexToCheck = 0;
-                double valueToRemove = 0;
+                decimal valueToRemove = 0;
                 for (int j = 0; j < array.GetLength(1); j++)
                 {
                     indexToCheck += 1 << indexesToCheck[j];
-                    array[k, indexesToFill[j]] = w[indexToCheck] - valueToRemove;
+                    array[k, indexesToFill[j]] = decimal.Round(w[indexToCheck] - valueToRemove, 1);
                     valueToRemove += array[k, indexesToFill[j]];
+                    decimal.Round(valueToRemove, 1);
                 }
             }
 
             return array;
         }
 
-        private double[] GetValueToPay(int count, double[] shaplyVector, List<int> subsets, double[] v)
+        private decimal[] GetValueToPay(int count, decimal[] shaplyVector, List<int> subsets, decimal[] v)
         {
-            double[] valueToPay = new double[count];
+            decimal[] valueToPay = new decimal[count];
             for (int k = 0; k < shaplyVector.Length; k++)
             {
                 valueToPay[k] = v[1 << subsets[k]] + shaplyVector[k];
@@ -372,13 +568,13 @@ namespace MyServer.Sevices
             return valueToPay;
         }
 
-        private double[] CalculateShaply(int count,double[,] array)
+        private decimal[] CalculateShaply(int count, decimal[,] array)
         {
-            double[] shaplyVector = new double[count];
+            decimal[] shaplyVector = new decimal[count];
 
             for (int k = 0; k < array.GetLength(1); k++)
             {
-                double sum = 0;
+                decimal sum = 0;
                 for (int j = 0; j < array.GetLength(0); j++)
                 {
                     sum += array[j, k];
@@ -388,14 +584,14 @@ namespace MyServer.Sevices
             return shaplyVector;
         }
 
-        private void CalculateValuesForPriceDistributionCalculatiions(int key, ref double[] w, ref double[] v, double[] priceForOneCar, List<int> subsets)
+        private void CalculateValuesForPriceDistributionCalculatiions(int key, ref decimal[] w, ref decimal[] v, decimal[] priceForOneCar, List<int> subsets)
         {
-            
+
             List<List<int>> combinations = GetAllCombinations(subsets);
 
             for (int x = 0; x < combinations.Count; x++)
             {
-                double sum = 0;
+                decimal sum = 0;
                 int indexInArray = 0;
                 foreach (var item in combinations[x])
                 {
@@ -403,7 +599,7 @@ namespace MyServer.Sevices
                     sum += priceForOneCar[1 << item];
                 }
                 v[indexInArray] = priceForOneCar[indexInArray];
-                w[indexInArray] = v[indexInArray] - sum;
+                w[indexInArray] = v[indexInArray] - decimal.Round(sum,1);
             }
         }
 
@@ -435,14 +631,14 @@ namespace MyServer.Sevices
             }
         }
 
-        private List<int> GetBitsFromBitmask(int bitmask)
+        private List<int> GetBitsFromBitmask(int bitmask, int coefficient)
         {
             List<int> indexes = new List<int>();
             for (int i = 0; i < sizeof(int) * 8; i++)
             {
                 if ((bitmask & (1 << i)) != 0)
                 {
-                    indexes.Add(i);
+                    indexes.Add(i + coefficient);
                 }
             }
 
@@ -529,7 +725,7 @@ namespace MyServer.Sevices
             return count;
         }
 
-        private void GetAnswer(int count, ShortestRoute[] result, ref double[] lowestPrice, ref double[] priceForOneCar, ref Dictionary<int, List<int>> distribution)
+        private void GetAnswer(int count, ShortestRoute[] result, ref decimal[] lowestPrice, ref decimal[] priceForOneCar, ref Dictionary<int, List<int>> distribution)
         {
 
             int c = count;
@@ -544,18 +740,18 @@ namespace MyServer.Sevices
             }
             for (int i = 0; i < length; i++, x++, y--)
             {
-                if (lowestPrice[arrsubsets[x]] == double.MaxValue)
+                if (lowestPrice[arrsubsets[x]] == decimal.MaxValue)
                 {
                     GetAnswer(arrsubsets[x], result, ref lowestPrice, ref priceForOneCar, ref distribution);
 
                 }
-                if (lowestPrice[arrsubsets[y]] == double.MaxValue)
+                if (lowestPrice[arrsubsets[y]] == decimal.MaxValue)
                 {
                     GetAnswer(arrsubsets[y], result, ref lowestPrice, ref priceForOneCar, ref distribution);
 
                 }
 
-                double temp = lowestPrice[arrsubsets[x]] + lowestPrice[arrsubsets[y]];
+                decimal temp = decimal.Round(lowestPrice[arrsubsets[x]] + lowestPrice[arrsubsets[y]],1);
                 if (temp > priceForOneCar[count])
                 {
                     temp = priceForOneCar[count];

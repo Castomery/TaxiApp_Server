@@ -15,6 +15,14 @@ namespace MyServer.Controllers
         }
 
         [HttpPost]
+        [Route("GetRouteMatrix")]
+        public async Task<ActionResult<string>> GetShortestRouteWithMatrix([FromQuery] string origin, [FromQuery] decimal priceForCar, [FromQuery] decimal pricePerKm, [FromQuery] int max_passengers, [FromBody] List<string> coordinates)
+        {
+            var result = await _distributionCalculation.GetShortestRouteWithMatrix(origin, priceForCar, pricePerKm,max_passengers, coordinates);
+            return Ok(result);
+        }
+
+        [HttpPost]
         [Route("GetRoute")]
         public async Task<ActionResult<string>> GetRoute([FromQuery] string origin, [FromBody] List<string> coordinates)
         {
@@ -24,7 +32,7 @@ namespace MyServer.Controllers
 
         [HttpPost]
         [Route("GetOptimalRoute")]
-        public async Task<ActionResult<string>> GetDistance([FromQuery] string origin, [FromQuery] double priceForCar, [FromQuery] double pricePerKm, [FromBody] List<string> coordinates)
+        public async Task<ActionResult<string>> GetDistance([FromQuery] string origin, [FromQuery] decimal priceForCar, [FromQuery] decimal pricePerKm, [FromBody] List<string> coordinates)
         {
             var result = await _distributionCalculation.GetPriceDistributionForOneCar(origin,priceForCar,pricePerKm, coordinates);
 
@@ -33,7 +41,7 @@ namespace MyServer.Controllers
 
         [HttpPost]
         [Route("GetDistribution")]
-        public async Task<ActionResult<string>> GetDistribution([FromQuery] string origin, [FromQuery] double priceForCar, [FromQuery] double pricePerKm, [FromQuery] int max_passengers, [FromBody] List<string> coordinates)
+        public async Task<ActionResult<string>> GetDistribution([FromQuery] string origin, [FromQuery] decimal priceForCar, [FromQuery] decimal pricePerKm, [FromQuery] int max_passengers, [FromBody] List<string> coordinates)
         {
             var result = await _distributionCalculation.GetDistribution(origin, priceForCar,pricePerKm, max_passengers,coordinates);
 
